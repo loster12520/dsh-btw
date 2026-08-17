@@ -95,7 +95,13 @@ function toDynamicBody(srcPath) {
   // 去掉文件头注释块（可选，保留有助于阅读）
   const cleaned = body
 
-  return `return {\n  ${injectDecl}apply(ctx) {${cleaned}\n  },\n}`
+  // 动态路径（cordis_define）沙箱不提供 primitives seed 的 require，注入
+  // MarkdownText = null 兜底；源码顶层的 `const MD = ...` 位于 apply 函数体外，
+  // 不会被 toDynamicBody 提取，这里一并补上（回退纯文本渲染）。
+  return `const MarkdownText = null;
+const MD = MarkdownText;
+
+return {\n  ${injectDecl}apply(ctx) {${cleaned}\n  },\n}`
 }
 
 function main() {

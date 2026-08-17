@@ -281,6 +281,9 @@ export function apply(ctx) {
       name: 'btw',
       description: '开启或继续旁路问答（只读分支：可查看主对话历史 + 只读/搜索权限，回答不进入主对话上下文）',
       input: { hint: '输入你的问题' },
+      // 不把用户的 /btw 输入写进主对话事件（command/run 不记录 args），
+      // 且 Client 半区注册了 keyed commandview 渲染 null，主对话完全不留痕迹。
+      recordInput: false,
               handler: async (invocation) => {
           const sessionId = invocation.agent?.session?.id
           if (!sessionId) return { kind: 'error', text: '无法获取当前会话' }
@@ -423,12 +426,10 @@ export function apply(ctx) {
         return
       }
       const pathname = new URL(req.url || '/', 'http://dsh.internal').pathname
+      // RPC 方法名带 btw/ 前缀（如 btw/panel-intent），URL 路径天然含斜杠，
+      // 不能在这里用 includes('/') 拒绝；未知方法由下方 rpcHandlers 查找兜底 404。
       const method = pathname.startsWith('/api/dsh-btw/') ? pathname.slice('/api/dsh-btw/'.length) : undefined
-      if (method === undefined || method.includes('/')) {
-        writeJson(res, 404, { ok: false, error: 'unknown dsh-btw API method' })
-        return
-      }
-      const handler = rpcHandlers[method]
+      const handler = method === undefined ? undefined : rpcHandlers[method]
       if (!handler) {
         writeJson(res, 404, { ok: false, error: 'unknown dsh-btw API method' })
         return

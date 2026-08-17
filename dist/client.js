@@ -9,6 +9,10 @@ window.__ModuleLoader__.load({
     Object.defineProperty(exports, Symbol.toStringTag, { value: "Module" });
     // React 来自客户端模块系统的 seed 表（与动态路径的 React 闭包符号等价）
     var React = require("react");
+    // MarkdownText 复用平台 GFM 渲染器（@deepseek-ai/dsh-client-ui-primitives 是
+    // PLATFORM_MODULES seed 词，require 直接命中，无需额外打包）。源码以 MD
+    // 标识符引用，未注入时回退纯文本。
+    var MarkdownText = require("@deepseek-ai/dsh-client-ui-primitives").MarkdownText;
     // host 桥：动态路径由宿主沙箱提供（harness.handle 配对）；静态路径映射到
     // /api/dsh-btw/* HTTP 路由（Host 半区注册，含浏览器信任围栏）。
     var host = {
@@ -50,59 +54,66 @@ window.__ModuleLoader__.load({
 
 const inject = ['timer']
 
+// MarkdownText：复用平台 GFM 渲染器（与主对话一致的代码块/表格/数学渲染）。
+// 该符号由构建脚本注入：静态路径 build-static.mjs 在 factory 闭包内
+// require("@deepseek-ai/dsh-client-ui-primitives") 提供；动态路径未注入时
+// typeof 为 undefined，MD 取 null 回退纯文本渲染。不要改成 const MarkdownText
+// 声明（会与构建注入的 var 冲突）。
+const MD = typeof MarkdownText !== 'undefined' ? MarkdownText : null
+
 function apply(ctx) {
   // ============ 共享面板状态（apply 闭包内，所有组件共享） ============
   // messages 与 Host 历史同步：id 去重追加
   const store = {
     open: false,
     sessionId: null,
-          bySession: new Map(),
-          focusRequest: 0,
+    bySession: new Map(),
+    focusRequest: 0,
     listeners: new Set(),
-    emit() { this.listeners.forEach((fn) => { try { fn() } catch (e) {} }) },
+    emit() { this.listeners.forEach((fn) => { try { fn() } catch (e) { } }) },
     subscribe(fn) { this.listeners.add(fn); return () => this.listeners.delete(fn) },
   }
 
-    const getBucket = (sessionId) => {
-      if (!store.bySession.has(sessionId)) {
-        store.bySession.set(sessionId, { messages: [], lastId: 0 })
-      }
-      return store.bySession.get(sessionId)
+  const getBucket = (sessionId) => {
+    if (!store.bySession.has(sessionId)) {
+      store.bySession.set(sessionId, { messages: [], lastId: 0 })
     }
+    return store.bySession.get(sessionId)
+  }
 
   const usePanel = () => {
-          const [snap, setSnap] = React.useState({ open: store.open, sessionId: store.sessionId, messages: store.sessionId ? getBucket(store.sessionId).messages.slice() : [], focusRequest: store.focusRequest })
-          React.useEffect(() => store.subscribe(() => setSnap({
-        open: store.open,
-        sessionId: store.sessionId,
-        messages: store.sessionId ? getBucket(store.sessionId).messages.slice() : [],
-        focusRequest: store.focusRequest,
-      })), [])
+    const [snap, setSnap] = React.useState({ open: store.open, sessionId: store.sessionId, messages: store.sessionId ? getBucket(store.sessionId).messages.slice() : [], focusRequest: store.focusRequest })
+    React.useEffect(() => store.subscribe(() => setSnap({
+      open: store.open,
+      sessionId: store.sessionId,
+      messages: store.sessionId ? getBucket(store.sessionId).messages.slice() : [],
+      focusRequest: store.focusRequest,
+    })), [])
     return snap
   }
 
   // 从 Host 历史同步（命令路径与面板路径的问答都进入面板）
   const syncFromHost = async (sessionId) => {
-      if (!sessionId) return
+    if (!sessionId) return
     try {
       const res = await host.call('btw/state', { sessionId })
       if (!res || !res.ok || !Array.isArray(res.messages)) return
-        const bucket = getBucket(sessionId)
+      const bucket = getBucket(sessionId)
       const msgs = res.messages
       if (msgs.length === 0) {
-                  if (bucket.messages.length > 0) { bucket.messages = []; bucket.lastId = 0; store.emit() }
+        if (bucket.messages.length > 0) { bucket.messages = []; bucket.lastId = 0; store.emit() }
         return
       }
       const maxId = msgs.reduce((m, x) => Math.max(m, Number(x.id) || 0), 0)
-      const fresh = msgs.filter(x => (Number(x.id) || 0) > store.lastId)
+      const fresh = msgs.filter(x => (Number(x.id) || 0) > bucket.lastId)
       if (fresh.length > 0) {
-        store.messages = store.messages.concat(fresh)
-        store.lastId = maxId
+        bucket.messages = bucket.messages.concat(fresh)
+        bucket.lastId = maxId
         store.emit()
-      } else if (maxId < store.lastId || store.messages.length === 0) {
+      } else if (maxId < bucket.lastId || bucket.messages.length === 0) {
         // Host 侧被清空或首次打开：全量替换
-        store.messages = msgs.slice()
-        store.lastId = maxId
+        bucket.messages = msgs.slice()
+        bucket.lastId = maxId
         store.emit()
       }
     } catch (e) { /* ignore */ }
@@ -110,23 +121,23 @@ function apply(ctx) {
 
   // 面板打开期间轮询同步（命令路径的问答也能出现在面板）
   ctx.interval(async () => {
-          if (store.open) await syncFromHost(store.sessionId)
+    if (store.open) await syncFromHost(store.sessionId)
   }, 1500)
 
-    // 命令触发打开面板/聚焦：Host 写入一次性意图，Client 低频轮询消费。
-    // 面板已打开时也轮询，以便无参 /btw 能聚焦输入框。
-    ctx.interval(async () => {
-      try {
-        const res = await host.call('btw/panel-intent')
-        if (!res || !res.ok || !res.sessionId) return
-        const targetSessionId = res.sessionId
-        store.sessionId = targetSessionId
-        store.open = true
-        store.focusRequest += 1
-        store.emit()
-        await syncFromHost(targetSessionId)
-      } catch (e) { /* ignore */ }
-    }, 500)
+  // 命令触发打开面板/聚焦：Host 写入一次性意图，Client 低频轮询消费。
+  // 面板已打开时也轮询，以便无参 /btw 能聚焦输入框。
+  ctx.interval(async () => {
+    try {
+      const res = await host.call('btw/panel-intent')
+      if (!res || !res.ok || !res.sessionId) return
+      const targetSessionId = res.sessionId
+      store.sessionId = targetSessionId
+      store.open = true
+      store.focusRequest += 1
+      store.emit()
+      await syncFromHost(targetSessionId)
+    } catch (e) { /* ignore */ }
+  }, 500)
 
   // ============ 样式（Package 私有，主题变量） ============
   styles.insert(`
@@ -146,17 +157,23 @@ function apply(ctx) {
   z-index: 1000; pointer-events: auto;
   box-shadow: 2px 0 14px rgba(0,0,0,0.18);
   font-size: 13px; color: var(--dsw-alias-label-primary);
+  padding: 8px;
 }
 .btw-panel-head {
   display: flex; align-items: center; gap: 6px;
-  padding: 10px 12px; border-bottom: 1px solid var(--dsw-alias-border-l1);
+  padding: 10px 20px; border-bottom: 1px solid var(--dsw-alias-border-l1);
 }
 .btw-panel-title { flex: 1; font-weight: 600; }
 .btw-panel-btn {
-  padding: 3px 8px; border-radius: 5px; cursor: pointer;
+  padding: 3px 8px; border-radius: 8px; cursor: pointer;
   border: 1px solid var(--dsw-alias-border-l1);
   background: transparent; color: var(--dsw-alias-label-secondary);
   font-size: 12px;
+  min-height: 32px;
+  min-width: 32px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
 }
 .btw-panel-btn:hover { background: var(--dsw-alias-bg-layer-2); color: var(--dsw-alias-label-primary); }
 .btw-panel-body {
@@ -197,10 +214,10 @@ function apply(ctx) {
 .btw-send:disabled { opacity: 0.5; cursor: default; }
 `)
 
-    styles.insert(`
+  styles.insert(`
   .btw-overlay {
     position: fixed; top: 0; right: 0; bottom: 0;
-    left: var(--dsw-sidebar-width, 240px); /* 排除左侧侧边栏，只遮罩右侧内容区 */
+    left: var(--dsw-sidebar-width, 280px); /* 排除左侧侧边栏，只遮罩右侧内容区 */
     background: rgba(0,0,0,0.45);
     display: flex; align-items: center; justify-content: center;
     z-index: 1000; pointer-events: auto;
@@ -217,66 +234,217 @@ function apply(ctx) {
     box-shadow: 0 6px 30px rgba(0,0,0,0.2);
     font-size: 13px; color: var(--dsw-alias-label-primary);
   }
+  /* assistant markdown 消息：复用平台 MarkdownText 渲染，补充面板内可读样式 */
+  .btw-msg-markdown { white-space: normal; overflow: hidden; }
+  .btw-msg-markdown > div { min-width: 0; }
+  .btw-msg-markdown p { margin: 0 0 8px; }
+  .btw-msg-markdown p:last-child { margin-bottom: 0; }
+  .btw-msg-markdown h1, .btw-msg-markdown h2, .btw-msg-markdown h3,
+  .btw-msg-markdown h4, .btw-msg-markdown h5, .btw-msg-markdown h6 {
+    margin: 10px 0 6px; line-height: 1.35; font-weight: 600;
+  }
+  .btw-msg-markdown h1 { font-size: 16px; }
+  .btw-msg-markdown h2 { font-size: 15px; }
+  .btw-msg-markdown h3, .btw-msg-markdown h4, .btw-msg-markdown h5, .btw-msg-markdown h6 { font-size: 14px; }
+  .btw-msg-markdown ul, .btw-msg-markdown ol { margin: 0 0 8px; padding-left: 20px; }
+  .btw-msg-markdown li { margin: 2px 0; }
+  .btw-msg-markdown code {
+    font-family: var(--dsw-font-mono, ui-monospace, SFMono-Regular, Consolas, monospace);
+    font-size: 12px;
+    background: var(--dsw-alias-bg-layer-2);
+    padding: 1px 4px; border-radius: 4px;
+  }
+  .btw-msg-markdown pre {
+    background: var(--dsw-alias-bg-base);
+    border: 1px solid var(--dsw-alias-border-l1);
+    border-radius: 8px;
+    padding: 10px 12px; overflow-x: auto;
+    margin: 0 0 8px;
+  }
+  .btw-msg-markdown pre code { background: none; padding: 0; }
+  .btw-msg-markdown blockquote {
+    margin: 0 0 8px; padding: 2px 12px;
+    border-left: 3px solid var(--dsw-alias-border-l1);
+    color: var(--dsw-alias-label-secondary);
+  }
+  .btw-msg-markdown a { color: var(--dsw-alias-brand-primary); text-decoration: none; }
+  .btw-msg-markdown a:hover { text-decoration: underline; }
+  .btw-msg-markdown table {
+    border-collapse: collapse; margin: 0 0 8px;
+    max-width: 100%; display: block; overflow-x: auto;
+  }
+  .btw-msg-markdown th, .btw-msg-markdown td {
+    border: 1px solid var(--dsw-alias-border-l1);
+    padding: 4px 8px; text-align: left;
+  }
+  .btw-msg-markdown th { background: var(--dsw-alias-bg-layer-2); font-weight: 600; }
+  .btw-msg-markdown hr { border: none; border-top: 1px solid var(--dsw-alias-border-l1); margin: 10px 0; }
   `)
 
   // ============ 会话头部按钮（session-scope，直接拿到 sessionId prop） ============
   const slots = ctx.get('slots')
   if (!slots) return
 
-    /* [old header toggle replaced below]
+  /* [old header toggle replaced below]
+slots.inject('conversation.session.header.actions', () => slots.register(
+  { name: 'conversation.session.header.actions', id: 'btw-panel-toggle', order: 30 },
+  (props) => {
+    const snap = usePanel()
+    // 跟随当前会话：session 切换后即使不重新点击按钮，
+    // 面板提问也指向当前会话（useEffect 中更新，避免渲染期副作用）
+    React.useEffect(() => {
+      if (store.sessionId !== props.sessionId) {
+        store.sessionId = props.sessionId
+        store.emit()
+      }
+    }, [props.sessionId])
+    return React.createElement('button', {
+      className: 'btw-toggle-btn',
+      title: snap.open ? '关闭 BTW 旁路面板' : '打开 BTW 旁路面板',
+      onClick: () => {
+        store.sessionId = props.sessionId
+        store.open = !snap.open
+        store.emit()
+        if (store.open) syncFromHost()
+      },
+    }, snap.open ? 'BTW ✓' : 'BTW')
+  },
+))
+  */
+
+  // ============ 会话切换同步器（session-scope，直接拿到 sessionId prop） ============
+  // 不再显示可见的 BTW 开关按钮；只保留一个隐形组件，让面板跟随当前活跃会话。
   slots.inject('conversation.session.header.actions', () => slots.register(
-    { name: 'conversation.session.header.actions', id: 'btw-panel-toggle', order: 30 },
+    { name: 'conversation.session.header.actions', id: 'btw-session-sync', order: 30 },
     (props) => {
-      const snap = usePanel()
-      // 跟随当前会话：session 切换后即使不重新点击按钮，
-      // 面板提问也指向当前会话（useEffect 中更新，避免渲染期副作用）
       React.useEffect(() => {
         if (store.sessionId !== props.sessionId) {
           store.sessionId = props.sessionId
           store.emit()
         }
       }, [props.sessionId])
-      return React.createElement('button', {
-        className: 'btw-toggle-btn',
-        title: snap.open ? '关闭 BTW 旁路面板' : '打开 BTW 旁路面板',
-        onClick: () => {
-          store.sessionId = props.sessionId
-          store.open = !snap.open
-          store.emit()
-          if (store.open) syncFromHost()
-        },
-      }, snap.open ? 'BTW ✓' : 'BTW')
+      return React.createElement('span', { style: { display: 'none' } })
     },
   ))
-    */
 
-    // ============ 会话切换同步器（session-scope，直接拿到 sessionId prop） ============
-    // 不再显示可见的 BTW 开关按钮；只保留一个隐形组件，让面板跟随当前活跃会话。
-    slots.inject('conversation.session.header.actions', () => slots.register(
-      { name: 'conversation.session.header.actions', id: 'btw-session-sync', order: 30 },
-      (props) => {
-        React.useEffect(() => {
-          if (store.sessionId !== props.sessionId) {
-            store.sessionId = props.sessionId
-            store.emit()
-          }
-        }, [props.sessionId])
-        return React.createElement('span', { style: { display: 'none' } })
-      },
-    ))
+  // ============ 隐藏主对话中的 /btw 命令卡片 ============
+  // dsh-commands 执行命令时会强制记录 command/run + command/done 事件，
+  // UI 渲染成命令卡片（这就是主对话里的"使用痕迹"）。conversation.chat.commandview
+  // 是 keyed slot（按命令名匹配），注册 key="btw" 的渲染器返回 null 即可彻底隐藏。
+  slots.inject('conversation.chat.commandview', () => slots.register(
+    { name: 'conversation.chat.commandview', id: 'btw-commandview', key: 'btw' },
+    () => null,
+  ))
 
   // ============ 左侧面板（overlay，不调用任何 standard hook） ============
-    /* [old BtwPanel replaced below]
+  /* [old BtwPanel replaced below]
+function BtwPanel(props) {
+  const [input, setInput] = React.useState('')
+  const [busy, setBusy] = React.useState(false)
+  const sessionId = store.sessionId
+
+  const send = async () => {
+    const text = input.trim()
+    if (!text || busy) return
+    if (!sessionId) {
+      store.messages.push({ role: 'assistant', text: '未关联会话：请先点击会话头部的 BTW 按钮打开面板。' })
+      store.emit()
+      return
+    }
+    setInput('')
+    setBusy(true)
+    try {
+      const res = await host.call('btw/ask', { sessionId, text })
+      // 返回的 history 直接同步（包含刚提交的问题与回答）
+      if (res && res.ok && Array.isArray(res.history)) {
+        const msgs = res.history
+        const maxId = msgs.reduce((m, x) => Math.max(m, Number(x.id) || 0), 0)
+        const fresh = msgs.filter(x => (Number(x.id) || 0) > store.lastId)
+        if (fresh.length > 0) {
+          store.messages = store.messages.concat(fresh)
+          store.lastId = maxId
+        } else {
+          store.messages = msgs.slice()
+          store.lastId = maxId
+        }
+        store.emit()
+      }
+    } catch (err) {
+      store.messages.push({ role: 'assistant', text: '错误: ' + String((err && err.message) || err) })
+      store.emit()
+    }
+    setBusy(false)
+  }
+
+  const clearAll = async () => {
+    try { if (sessionId) await host.call('btw/clear', { sessionId }) } catch (e) {}
+    store.messages = []
+    store.lastId = 0
+    store.emit()
+  }
+
+  // 键盘快捷键：Ctrl+Shift+K 清空对话记录（面板打开时生效）
+  React.useEffect(() => {
+    const onKey = (e) => {
+      if ((e.ctrlKey || e.metaKey) && e.shiftKey && (e.key === 'K' || e.key === 'k')) {
+        e.preventDefault()
+        clearAll()
+      }
+    }
+    if (typeof window !== 'undefined') window.addEventListener('keydown', onKey)
+    return () => { if (typeof window !== 'undefined') window.removeEventListener('keydown', onKey) }
+  }, [])
+
+  const msgs = store.messages
+  return React.createElement('div', { className: 'btw-panel' },
+    React.createElement('div', { className: 'btw-panel-head' },
+      React.createElement('span', { className: 'btw-panel-title' }, 'BTW 旁路对话'),
+      React.createElement('button', { className: 'btw-panel-btn', onClick: clearAll, title: '清空对话记录（Ctrl+Shift+K）' }, '清空'),
+      React.createElement('button', { className: 'btw-panel-btn', onClick: () => { store.open = false; store.emit() }, title: '关闭面板' }, '✕'),
+    ),
+    React.createElement('div', { className: 'btw-panel-body' },
+      msgs.length === 0
+        ? React.createElement('div', { className: 'btw-panel-empty' }, '旁路问答（只读分支，可查看主对话历史）\n输入问题开始，或直接在输入框用 /btw <问题>\n\n清空记录：Ctrl+Shift+K 或点击「清空」')
+        : msgs.map((m, i) => React.createElement('div', { className: 'btw-msg btw-msg-' + m.role, key: String(m.id || i) },
+            React.createElement('div', { className: 'btw-msg-label' }, m.role === 'user' ? '你' : 'BTW'),
+            React.createElement('div', { className: 'btw-msg-text' }, m.text))),
+      busy && React.createElement('div', { className: 'btw-msg btw-msg-assistant' },
+        React.createElement('div', { className: 'btw-msg-label' }, 'BTW'),
+        React.createElement('div', { className: 'btw-msg-text' }, '思考中…')),
+    ),
+    React.createElement('div', { className: 'btw-panel-foot' },
+      React.createElement('input', {
+        className: 'btw-input',
+        value: input,
+        placeholder: '向旁路分支提问…',
+        onChange: (e) => setInput(e.target.value),
+        onKeyDown: (e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send() } },
+      }),
+      React.createElement('button', { className: 'btw-send', onClick: send, disabled: busy || !input.trim() }, '发送'),
+    ),
+  )
+}
+  */
+
+  // ============ 居中弹窗面板（overlay，不调用任何 standard hook） ============
   function BtwPanel(props) {
     const [input, setInput] = React.useState('')
     const [busy, setBusy] = React.useState(false)
+    const inputRef = React.useRef(null)
     const sessionId = store.sessionId
+    const bucket = sessionId ? getBucket(sessionId) : null
+
+    // 命令触发打开/聚焦时，自动聚焦输入框
+    React.useEffect(() => {
+      if (inputRef.current) inputRef.current.focus()
+    }, [props.focusRequest])
 
     const send = async () => {
       const text = input.trim()
       if (!text || busy) return
       if (!sessionId) {
-        store.messages.push({ role: 'assistant', text: '未关联会话：请先点击会话头部的 BTW 按钮打开面板。' })
+        const b = getBucket(null)
+        b.messages.push({ role: 'assistant', text: '未关联会话：请先使用 /btw 打开面板。' })
         store.emit()
         return
       }
@@ -286,33 +454,43 @@ function apply(ctx) {
         const res = await host.call('btw/ask', { sessionId, text })
         // 返回的 history 直接同步（包含刚提交的问题与回答）
         if (res && res.ok && Array.isArray(res.history)) {
+          const bucket = getBucket(sessionId)
           const msgs = res.history
           const maxId = msgs.reduce((m, x) => Math.max(m, Number(x.id) || 0), 0)
-          const fresh = msgs.filter(x => (Number(x.id) || 0) > store.lastId)
+          const fresh = msgs.filter(x => (Number(x.id) || 0) > bucket.lastId)
           if (fresh.length > 0) {
-            store.messages = store.messages.concat(fresh)
-            store.lastId = maxId
+            bucket.messages = bucket.messages.concat(fresh)
+            bucket.lastId = maxId
           } else {
-            store.messages = msgs.slice()
-            store.lastId = maxId
+            bucket.messages = msgs.slice()
+            bucket.lastId = maxId
           }
           store.emit()
         }
       } catch (err) {
-        store.messages.push({ role: 'assistant', text: '错误: ' + String((err && err.message) || err) })
+        const b = getBucket(sessionId)
+        b.messages.push({ role: 'assistant', text: '错误: ' + String((err && err.message) || err) })
         store.emit()
       }
       setBusy(false)
     }
 
     const clearAll = async () => {
-      try { if (sessionId) await host.call('btw/clear', { sessionId }) } catch (e) {}
-      store.messages = []
-      store.lastId = 0
+      try { if (sessionId) await host.call('btw/clear', { sessionId }) } catch (e) { }
+      if (sessionId) {
+        const b = getBucket(sessionId)
+        b.messages = []
+        b.lastId = 0
+      }
       store.emit()
     }
 
-    // 键盘快捷键：Ctrl+Shift+K 清空对话记录（面板打开时生效）
+    const close = () => {
+      store.open = false
+      store.emit()
+    }
+
+    // 键盘快捷键：Ctrl+Shift+K 清空当前会话对话记录（面板打开时生效）
     React.useEffect(() => {
       const onKey = (e) => {
         if ((e.ctrlKey || e.metaKey) && e.shiftKey && (e.key === 'K' || e.key === 'k')) {
@@ -324,145 +502,41 @@ function apply(ctx) {
       return () => { if (typeof window !== 'undefined') window.removeEventListener('keydown', onKey) }
     }, [])
 
-    const msgs = store.messages
-    return React.createElement('div', { className: 'btw-panel' },
-      React.createElement('div', { className: 'btw-panel-head' },
-        React.createElement('span', { className: 'btw-panel-title' }, 'BTW 旁路对话'),
-        React.createElement('button', { className: 'btw-panel-btn', onClick: clearAll, title: '清空对话记录（Ctrl+Shift+K）' }, '清空'),
-        React.createElement('button', { className: 'btw-panel-btn', onClick: () => { store.open = false; store.emit() }, title: '关闭面板' }, '✕'),
-      ),
-      React.createElement('div', { className: 'btw-panel-body' },
-        msgs.length === 0
-          ? React.createElement('div', { className: 'btw-panel-empty' }, '旁路问答（只读分支，可查看主对话历史）\n输入问题开始，或直接在输入框用 /btw <问题>\n\n清空记录：Ctrl+Shift+K 或点击「清空」')
-          : msgs.map((m, i) => React.createElement('div', { className: 'btw-msg btw-msg-' + m.role, key: String(m.id || i) },
+    const msgs = bucket ? bucket.messages : []
+    return React.createElement('div', { className: 'btw-overlay', onClick: close },
+      React.createElement('div', { className: 'btw-panel', onClick: (e) => e.stopPropagation() },
+        React.createElement('div', { className: 'btw-panel-head' },
+          React.createElement('span', { className: 'btw-panel-title' }, 'BTW 旁路对话'),
+          React.createElement('button', { className: 'btw-panel-btn', onClick: clearAll, title: '清空对话记录（Ctrl+Shift+K）' }, '清空'),
+          React.createElement('button', { className: 'btw-panel-btn', onClick: close, title: '关闭面板' }, '✕'),
+        ),
+        React.createElement('div', { className: 'btw-panel-body' },
+          msgs.length === 0
+            ? React.createElement('div', { className: 'btw-panel-empty' }, '旁路问答（只读分支，可查看主对话历史）\n输入问题开始，或直接在输入框用 /btw <问题>\n\n清空记录：Ctrl+Shift+K 或点击「清空」')
+            : msgs.map((m, i) => React.createElement('div', { className: 'btw-msg btw-msg-' + m.role, key: String(m.id || i) },
               React.createElement('div', { className: 'btw-msg-label' }, m.role === 'user' ? '你' : 'BTW'),
-              React.createElement('div', { className: 'btw-msg-text' }, m.text))),
-        busy && React.createElement('div', { className: 'btw-msg btw-msg-assistant' },
-          React.createElement('div', { className: 'btw-msg-label' }, 'BTW'),
-          React.createElement('div', { className: 'btw-msg-text' }, '思考中…')),
-      ),
-      React.createElement('div', { className: 'btw-panel-foot' },
-        React.createElement('input', {
-          className: 'btw-input',
-          value: input,
-          placeholder: '向旁路分支提问…',
-          onChange: (e) => setInput(e.target.value),
-          onKeyDown: (e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send() } },
-        }),
-        React.createElement('button', { className: 'btw-send', onClick: send, disabled: busy || !input.trim() }, '发送'),
+              m.role === 'assistant' && MD
+                ? React.createElement('div', { className: 'btw-msg-text btw-msg-markdown' },
+                    React.createElement(MD, { text: m.text }))
+                : React.createElement('div', { className: 'btw-msg-text' }, m.text))),
+          busy && React.createElement('div', { className: 'btw-msg btw-msg-assistant' },
+            React.createElement('div', { className: 'btw-msg-label' }, 'BTW'),
+            React.createElement('div', { className: 'btw-msg-text' }, '思考中…')),
+        ),
+        React.createElement('div', { className: 'btw-panel-foot' },
+          React.createElement('input', {
+            ref: inputRef,
+            className: 'btw-input',
+            value: input,
+            placeholder: '向旁路分支提问…',
+            onChange: (e) => setInput(e.target.value),
+            onKeyDown: (e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send() } },
+          }),
+          React.createElement('button', { className: 'btw-send', onClick: send, disabled: busy || !input.trim() }, '发送'),
+        ),
       ),
     )
   }
-    */
-
-    // ============ 居中弹窗面板（overlay，不调用任何 standard hook） ============
-    function BtwPanel(props) {
-      const [input, setInput] = React.useState('')
-      const [busy, setBusy] = React.useState(false)
-      const inputRef = React.useRef(null)
-      const sessionId = store.sessionId
-      const bucket = sessionId ? getBucket(sessionId) : null
-
-      // 命令触发打开/聚焦时，自动聚焦输入框
-      React.useEffect(() => {
-        if (inputRef.current) inputRef.current.focus()
-      }, [props.focusRequest])
-
-      const send = async () => {
-        const text = input.trim()
-        if (!text || busy) return
-        if (!sessionId) {
-          const b = getBucket(null)
-          b.messages.push({ role: 'assistant', text: '未关联会话：请先使用 /btw 打开面板。' })
-          store.emit()
-          return
-        }
-        setInput('')
-        setBusy(true)
-        try {
-          const res = await host.call('btw/ask', { sessionId, text })
-          // 返回的 history 直接同步（包含刚提交的问题与回答）
-          if (res && res.ok && Array.isArray(res.history)) {
-            const bucket = getBucket(sessionId)
-            const msgs = res.history
-            const maxId = msgs.reduce((m, x) => Math.max(m, Number(x.id) || 0), 0)
-            const fresh = msgs.filter(x => (Number(x.id) || 0) > bucket.lastId)
-            if (fresh.length > 0) {
-              bucket.messages = bucket.messages.concat(fresh)
-              bucket.lastId = maxId
-            } else {
-              bucket.messages = msgs.slice()
-              bucket.lastId = maxId
-            }
-            store.emit()
-          }
-        } catch (err) {
-          const b = getBucket(sessionId)
-          b.messages.push({ role: 'assistant', text: '错误: ' + String((err && err.message) || err) })
-          store.emit()
-        }
-        setBusy(false)
-      }
-
-      const clearAll = async () => {
-        try { if (sessionId) await host.call('btw/clear', { sessionId }) } catch (e) {}
-        if (sessionId) {
-          const b = getBucket(sessionId)
-          b.messages = []
-          b.lastId = 0
-        }
-        store.emit()
-      }
-
-      const close = () => {
-        store.open = false
-        store.emit()
-      }
-
-      // 键盘快捷键：Ctrl+Shift+K 清空当前会话对话记录（面板打开时生效）
-      React.useEffect(() => {
-        const onKey = (e) => {
-          if ((e.ctrlKey || e.metaKey) && e.shiftKey && (e.key === 'K' || e.key === 'k')) {
-            e.preventDefault()
-            clearAll()
-          }
-        }
-        if (typeof window !== 'undefined') window.addEventListener('keydown', onKey)
-        return () => { if (typeof window !== 'undefined') window.removeEventListener('keydown', onKey) }
-      }, [])
-
-      const msgs = bucket ? bucket.messages : []
-      return React.createElement('div', { className: 'btw-overlay', onClick: close },
-        React.createElement('div', { className: 'btw-panel', onClick: (e) => e.stopPropagation() },
-          React.createElement('div', { className: 'btw-panel-head' },
-            React.createElement('span', { className: 'btw-panel-title' }, 'BTW 旁路对话'),
-            React.createElement('button', { className: 'btw-panel-btn', onClick: clearAll, title: '清空对话记录（Ctrl+Shift+K）' }, '清空'),
-            React.createElement('button', { className: 'btw-panel-btn', onClick: close, title: '关闭面板' }, '✕'),
-          ),
-          React.createElement('div', { className: 'btw-panel-body' },
-            msgs.length === 0
-              ? React.createElement('div', { className: 'btw-panel-empty' }, '旁路问答（只读分支，可查看主对话历史）\n输入问题开始，或直接在输入框用 /btw <问题>\n\n清空记录：Ctrl+Shift+K 或点击「清空」')
-              : msgs.map((m, i) => React.createElement('div', { className: 'btw-msg btw-msg-' + m.role, key: String(m.id || i) },
-                  React.createElement('div', { className: 'btw-msg-label' }, m.role === 'user' ? '你' : 'BTW'),
-                  React.createElement('div', { className: 'btw-msg-text' }, m.text))),
-            busy && React.createElement('div', { className: 'btw-msg btw-msg-assistant' },
-              React.createElement('div', { className: 'btw-msg-label' }, 'BTW'),
-              React.createElement('div', { className: 'btw-msg-text' }, '思考中…')),
-          ),
-          React.createElement('div', { className: 'btw-panel-foot' },
-            React.createElement('input', {
-              ref: inputRef,
-              className: 'btw-input',
-              value: input,
-              placeholder: '向旁路分支提问…',
-              onChange: (e) => setInput(e.target.value),
-              onKeyDown: (e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send() } },
-            }),
-            React.createElement('button', { className: 'btw-send', onClick: send, disabled: busy || !input.trim() }, '发送'),
-          ),
-        ),
-      )
-    }
 
   slots.inject('shell.overlay', () => slots.register(
     { name: 'shell.overlay', id: 'btw-panel' },
@@ -470,7 +544,7 @@ function apply(ctx) {
       // 不调用任何 standard hook（root scope 外无法安全使用 useSessions）
       const snap = usePanel()
       if (!snap.open) return null
-              return React.createElement(BtwPanel, { focusRequest: snap.focusRequest })
+      return React.createElement(BtwPanel, { focusRequest: snap.focusRequest })
     },
   ))
 }

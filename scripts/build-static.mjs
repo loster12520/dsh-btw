@@ -44,6 +44,10 @@ window.__ModuleLoader__.load({
     Object.defineProperty(exports, Symbol.toStringTag, { value: "Module" });
     // React 来自客户端模块系统的 seed 表（与动态路径的 React 闭包符号等价）
     var React = require("react");
+    // MarkdownText 复用平台 GFM 渲染器（@deepseek-ai/dsh-client-ui-primitives 是
+    // PLATFORM_MODULES seed 词，require 直接命中，无需额外打包）。源码以 MD
+    // 标识符引用，未注入时回退纯文本。
+    var MarkdownText = require("@deepseek-ai/dsh-client-ui-primitives").MarkdownText;
     // host 桥：动态路径由宿主沙箱提供（harness.handle 配对）；静态路径映射到
     // /api/dsh-btw/* HTTP 路由（Host 半区注册，含浏览器信任围栏）。
     var host = {

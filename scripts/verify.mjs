@@ -51,6 +51,7 @@ function validateStaticBundle(file) {
     if (!handoff || handoff.id !== 'dsh-btw') throw new Error('未按约定调用 __ModuleLoader__.load({ id: "dsh-btw", factory })')
     const out = handoff.factory((spec) => {
       if (spec === 'react') return fakeReact
+      if (spec === '@deepseek-ai/dsh-client-ui-primitives') return { MarkdownText: () => null }
       throw new Error(`意外的 require: ${spec}`)
     })
     if (typeof out.apply !== 'function' || !Array.isArray(out.inject)) {
