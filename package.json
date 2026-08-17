@@ -1,23 +1,27 @@
 {
   "name": "dsh-btw",
   "version": "0.1.0",
-  "description": "DSH 旁路问答插件：/btw 命令 + 左侧面板，只读分支可查看主对话历史，不污染主上下文（对齐 Claude Code /btw）",
+  "description": "DSH 旁路问答插件：/btw 命令 + 居中弹窗面板，只读分支可查看主对话历史，不污染主上下文（对齐 Claude Code /btw）",
   "type": "module",
   "main": "src/host.js",
   "exports": {
     ".": "./src/host.js",
-    "./client": "./src/client.js",
+    "./client": "./dist/client.js",
     "./package.json": "./package.json"
   },
   "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
     "client": {
       "platform": "web"
     }
   },
   "scripts": {
     "to-dynamic": "node scripts/to-dynamic.mjs",
+    "build": "node scripts/build-static.mjs",
     "verify": "node scripts/verify.mjs",
-    "check": "npm run to-dynamic && npm run verify"
+    "check": "npm run to-dynamic && npm run build && npm run verify"
   },
   "license": "MIT"
 }

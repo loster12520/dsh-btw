@@ -1,3 +1,37 @@
+/* dsh-btw 静态 Client 半区 bundle —— 由 scripts/build-static.mjs 生成，请勿手改。
+ * 修改 src/client.js 后重新运行：npm run build（或 npm run check）。
+ * 格式：window.__ModuleLoader__.load({ id, factory })（client-modules 约定）。 */
+window.__ModuleLoader__.load({
+  id: "dsh-btw",
+  factory: (require) => {
+    var module = { exports: {} };
+    var exports = module.exports;
+    Object.defineProperty(exports, Symbol.toStringTag, { value: "Module" });
+    // React 来自客户端模块系统的 seed 表（与动态路径的 React 闭包符号等价）
+    var React = require("react");
+    // host 桥：动态路径由宿主沙箱提供（harness.handle 配对）；静态路径映射到
+    // /api/dsh-btw/* HTTP 路由（Host 半区注册，含浏览器信任围栏）。
+    var host = {
+      call: async (method, args) => {
+        const res = await fetch("/api/dsh-btw" + '/' + method, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify(args === undefined ? null : args),
+        });
+        if (!res.ok) throw new Error('dsh-btw host call failed: HTTP ' + res.status);
+        return res.json();
+      }
+    };
+    // styles 桥：静态路径下直接注入 <style> 标签（data-plugin 标记供 HMR 认领）
+    var styles = {
+      insert(css) {
+        const tag = document.createElement('style');
+        tag.setAttribute('data-plugin', "dsh-btw");
+        tag.textContent = css;
+        document.head.append(tag);
+        return () => tag.remove();
+      }
+    };
 /**
  * dsh-btw — Client 半区
  *
@@ -14,9 +48,9 @@
  *   - 静态插件：本文件导出 apply，经 dsh.client 声明由 client-modules 加载
  */
 
-export const inject = ['timer']
+const inject = ['timer']
 
-export function apply(ctx) {
+function apply(ctx) {
   // ============ 共享面板状态（apply 闭包内，所有组件共享） ============
   // messages 与 Host 历史同步：id 去重追加
   const store = {
@@ -440,3 +474,9 @@ export function apply(ctx) {
     },
   ))
 }
+
+    exports.inject = inject;
+    exports.apply = apply;
+    return module.exports;
+  }
+});

@@ -16,22 +16,36 @@
  *   btw/state RPC 轮询同步显示。
  *
  * 挂载方式：
- *   - 动态插件：把本文件的 apply 逻辑作为 code.host（见 scripts/to-dynamic.mjs）
- *   - 静态插件：本文件导出 apply，作为 cordis 插件行加载
+ *   - 一键安装（推荐）：`dsh plugin --profile web add <本仓库路径>`。本文件作为
+ *     cordis 插件行（cordis.patch.yml insert）加载，经 webServer 注册
+ *     /api/dsh-btw/* HTTP 路由（带浏览器信任围栏）供静态 Client 半区 fetch 调用。
+ *   - 动态插件：把本文件的 apply 逻辑作为 code.host（见 scripts/to-dynamic.mjs）。
+ *     动态宿主沙箱会提供 `harness` 全局，此处用 typeof 守卫同时兼容两种路径。
+ *   - 静态插件：本文件导出 apply，作为 cordis 插件行加载。
  */
 
-export const inject = ['timer']
+export const inject = ['timer', 'webServer']
 
 export function apply(ctx) {
   // ================= 状态 =================
-  const state = {
+          const sessions = new Map() // sessionId -> SessionState
+    let openPanelIntent = null // Client 待消费的“打开面板”意图（单值，UI 为单一弹窗）
+
+    const getSession = (sessionId) => {
+      let s = sessions.get(sessionId)
+      if (!s) {
+        s = {
     handle: null,           // AgentHandle（裸 agent 分支）
     childId: null,          // 分支 session id
     lastSyncedSeq: -1,      // 主对话同步水位
     msgSeq: 0,              // 生成 UserMessage id 用
     history: [],            // [{ id, role, text }] 问答历史
     histSeq: 0,             // 历史消息自增 id
-    askQueue: Promise.resolve(), // 串行化 ask：命令与面板并发提问时排队，避免 waiters 单槽位覆盖
+          askQueue: Promise.resolve(), // 串行化 ask：命令与面板并发提问时排队
+        }
+        sessions.set(sessionId, s)
+      }
+      return s
   }
   const waiters = new Map() // childId -> { resolve, reject, timer, turn, texts }
 
@@ -71,9 +85,10 @@ export function apply(ctx) {
     return { text: parts.join('\n'), lastSeq: last }
   }
 
-  const pushHistory = (role, text) => {
-    state.history.push({ id: ++state.histSeq, role, text })
-    if (state.history.length > 200) state.history = state.history.slice(-200)
+  const pushHistory = (sessionId, role, text) => {
+      const s = getSession(sessionId)
+          s.history.push({ id: ++s.histSeq, role, text })
+          if (s.history.length > 200) s.history = s.history.slice(-200)
   }
 
   // ================= 分支回答监听 =================
@@ -146,31 +161,32 @@ export function apply(ctx) {
   }
 
   // ================= 核心 ask =================
-  const askInner = async (parent, text, signal) => {
+  const askInner = async (parent, sessionId, text, signal) => {
+      const s = getSession(sessionId)
     const question = String(text || '').trim()
     if (!question) throw new Error('问题不能为空')
 
-    if (!state.handle || !state.childId) {
+    if (!s.handle || !s.childId) {
       // 新建分支（复用同一分支：只有清空或插件重启后才会重建）
-      state.lastSyncedSeq = lastCompletedTurnSeq(parent)
+      s.lastSyncedSeq = lastCompletedTurnSeq(parent)
       const created = await createBranch(parent, signal)
-      state.handle = created.handle
-      state.childId = created.childId
+              s.handle = created.handle
+              s.childId = created.childId
     }
 
-    const childId = state.childId
+          const childId = s.childId
     const content = []
     // 注入主对话增量（自上次同步水位之后的新消息），随后推进水位到实际读到的最后一条消息
-    const delta = readMainDelta(parent, state.lastSyncedSeq)
-    state.lastSyncedSeq = delta.lastSeq
+          const delta = readMainDelta(parent, s.lastSyncedSeq)
+          s.lastSyncedSeq = delta.lastSeq
     if (delta.text) content.push({ type: 'text', text: '【主对话最新进展，供你参考】\n' + delta.text })
     content.push({ type: 'text', text: question })
 
     const waiter = waitAnswer(childId, 120000)
-    const agent = state.handle.agent
+          const agent = s.handle.agent
     try {
       agent.followup({
-        id: 'btw-' + (++state.msgSeq),
+                  id: 'btw-' + (++s.msgSeq),
         role: 'user',
         content,
         source: { kind: 'user' },
@@ -184,23 +200,28 @@ export function apply(ctx) {
     const answer = await waiter
 
     // 记录到统一历史（面板同步显示）
-    pushHistory('user', question)
-    pushHistory('assistant', answer || '（分支未产生回答）')
+          pushHistory(sessionId, 'user', question)
+          pushHistory(sessionId, 'assistant', answer || '（分支未产生回答）')
     return answer
   }
 
   // 串行化入口：命令路径与面板路径可能并发提问，排队执行避免
   // waiters（单槽位）被覆盖导致回答丢失或悬挂。
-  const ask = (parent, text, signal) => {
-    const run = state.askQueue.then(() => askInner(parent, text, signal))
+  const ask = (parent, sessionId, text, signal) => {
+      const s = getSession(sessionId)
+          const run = s.askQueue.then(() => askInner(parent, sessionId, text, signal))
     // 队列自身吞掉错误，保证后续任务继续执行；调用方从 run 拿到真实结果
-    state.askQueue = run.catch(() => {})
+          s.askQueue = run.catch(() => {})
     return run
   }
 
-  const clearBtw = async () => {
+    /* [old clearBtw replaced below]
+  const clearBtw = async (sessionId) => {
+      const s = sessions.get(sessionId)
+      if (!s) return
+      if (s.handle) {
     if (state.handle) {
-      try { await state.handle.dispose() } catch (e) { /* ignore */ }
+      try { await s.handle.dispose() } catch (e) { // ignore }
     }
     for (const [id, waiter] of waiters) {
       waiters.delete(id)
@@ -213,7 +234,26 @@ export function apply(ctx) {
     state.history = []
     state.histSeq = 0
   }
+    */
 
+    const clearBtw = async (sessionId) => {
+      const s = sessions.get(sessionId)
+      if (!s) return
+      if (s.handle) {
+        try { await s.handle.dispose() } catch (e) { /* ignore */ }
+      }
+      if (s.childId) {
+        const waiter = waiters.get(s.childId)
+        if (waiter) {
+          waiters.delete(s.childId)
+          waiter.timer()
+          waiter.reject(new Error('btw 对话已清空'))
+        }
+      }
+      sessions.delete(sessionId)
+    }
+
+    /* [old ctx.effect replaced below]
   // 插件停止/更新时释放分支
   ctx.effect(() => () => {
     if (state.handle) {
@@ -222,6 +262,17 @@ export function apply(ctx) {
       state.childId = null
     }
   })
+    */
+
+    // 插件停止/更新时释放所有会话分支
+    ctx.effect(() => () => {
+      for (const s of sessions.values()) {
+        if (s.handle) {
+          s.handle.dispose().catch(() => {})
+        }
+      }
+      sessions.clear()
+    })
 
   // ================= 命令：/btw <问题> =================
   const commands = ctx.get('commands')
@@ -230,13 +281,19 @@ export function apply(ctx) {
       name: 'btw',
       description: '开启或继续旁路问答（只读分支：可查看主对话历史 + 只读/搜索权限，回答不进入主对话上下文）',
       input: { hint: '输入你的问题' },
-      handler: async (invocation) => {
+              handler: async (invocation) => {
+          const sessionId = invocation.agent?.session?.id
+          if (!sessionId) return { kind: 'error', text: '无法获取当前会话' }
         const text = (invocation.rawInput || '').trim()
-        if (!text) return { kind: 'success', text: 'BTW 旁路问答已就绪。请在左侧 BTW 面板提问，或使用 /btw <问题>。' }
+                  if (!text) {
+            openPanelIntent = sessionId
+            return { kind: 'success', text: '' }
+          }
         try {
-          await ask(invocation.agent, text, invocation.signal)
+                      openPanelIntent = sessionId
+            await ask(invocation.agent, sessionId, text, invocation.signal)
           // 答案不显示在主对话命令卡片，而是进入 btw 面板（经轮询同步）
-          return { kind: 'success', text: 'BTW 分支已回答，详见左侧 BTW 面板。' }
+                      return { kind: 'success', text: 'BTW 分支已回答，详见 BTW 面板。' }
         } catch (err) {
           return { kind: 'error', text: String(err && err.message || err) }
         }
@@ -244,31 +301,145 @@ export function apply(ctx) {
     })
   }
 
-  // ================= RPC：面板交互 =================
-  harness.handle('btw/ask', async (args) => {
-    const input = (args && typeof args === 'object') ? args : {}
-    const agents = ctx.get('agents')
-    let agent = agents && agents.get(input.sessionId)
-    // 兜底：无 sessionId 或找不到时，取当前根 agent（面板可能未关联会话）
-    if (!agent && agents) {
-      const roots = agents.roots()
-      agent = roots && roots.length > 0 ? roots[0] : undefined
+  // ================= Host RPC 方法（动态 harness 与静态 HTTP 路由共用） =================
+  const rpcHandlers = {
+    'btw/ask': async (args) => {
+      const input = (args && typeof args === 'object') ? args : {}
+      const agents = ctx.get('agents')
+      let agent = agents && agents.get(input.sessionId)
+      // 兜底：无 sessionId 或找不到时，取当前根 agent（面板可能未关联会话）
+      if (!agent && agents) {
+        const roots = agents.roots()
+        agent = roots && roots.length > 0 ? roots[0] : undefined
+      }
+      if (!agent) return { ok: false, error: '找不到会话' }
+      const sessionId = agent.session?.id || input.sessionId
+      if (!sessionId) return { ok: false, error: '找不到会话' }
+      try {
+        const answer = await agent.runMaintenance(async (signal) => ask(agent, sessionId, input.text, signal))
+        const s = getSession(sessionId)
+        return { ok: true, answer, history: s.history.slice() }
+      } catch (err) {
+        return { ok: false, error: String(err && err.message || err) }
+      }
+    },
+    'btw/state': async (args) => {
+      const sessionId = args && args.sessionId
+      if (!sessionId || !sessions.has(sessionId)) return { ok: true, messages: [] }
+      return { ok: true, messages: sessions.get(sessionId).history.slice() }
+    },
+    'btw/clear': async (args) => {
+      const sessionId = args && args.sessionId
+      if (sessionId) await clearBtw(sessionId)
+      return { ok: true }
+    },
+    'btw/panel-intent': async () => {
+      const sessionId = openPanelIntent
+      openPanelIntent = null
+      return { ok: true, sessionId }
+    },
+  }
+
+  // 动态插件路径：`harness` 全局只存在于 cordis_define 的动态宿主沙箱中
+  // （dsh-cordis-host-runner）；静态插件路径下它是未定义标识符，需用 typeof 守卫。
+  if (typeof harness !== 'undefined') {
+    for (const [method, handler] of Object.entries(rpcHandlers)) {
+      harness.handle(method, handler)
     }
-    if (!agent) return { ok: false, error: '找不到会话' }
+  }
+
+  // ================= 静态插件路径：/api/dsh-btw HTTP 路由（带浏览器信任围栏） =================
+  // `dsh plugin --profile web add <本仓库路径>` 安装后，Client 半区（dist/client.js）
+  // 经普通 fetch 调用这里，语义与动态路径的 host.call 完全一致（同参数、同返回）。
+  const trustedHostsOf = () => {
     try {
-      const answer = await agent.runMaintenance(async (signal) => ask(agent, input.text, signal))
-      return { ok: true, answer, history: state.history.slice() }
-    } catch (err) {
-      return { ok: false, error: String(err && err.message || err) }
+      const loader = ctx.get('loader')
+      for (const entry of loader ? loader.entries() : []) {
+        if (entry.options && entry.options.name === 'connection') {
+          return (entry.options.config && entry.options.config.trustedHosts) || []
+        }
+      }
+    } catch (e) { /* ignore */ }
+    return []
+  }
+  const parseAuthority = (authority) => {
+    try { return new URL('http://' + authority) } catch (e) { return undefined }
+  }
+  const isLoopbackHostname = (hostname) => {
+    if (hostname === 'localhost' || hostname === '[::1]') return true
+    const parts = hostname.split('.')
+    return parts.length === 4 && parts[0] === '127' && parts.every((p) => /^\d{1,3}$/.test(p) && Number(p) <= 255)
+  }
+  const canonicalAuthority = (entry, entryUrl) => {
+    const port = entryUrl.port !== '' ? entryUrl.port : new URL('https://' + entry).port
+    return port === '' ? entryUrl.hostname : `${entryUrl.hostname}:${port}`
+  }
+  const isTrustedAuthority = (hostUrl, trustedHosts) => trustedHosts.some((entry) => {
+    const entryUrl = parseAuthority(entry)
+    if (entryUrl === undefined) return false
+    return canonicalAuthority(entry, entryUrl) === entryUrl.hostname
+      ? entryUrl.hostname === hostUrl.hostname
+      : entryUrl.host === hostUrl.host
+  })
+  const isTrustedApiRequest = (req) => {
+    const host = req.headers && req.headers.host
+    if (typeof host !== 'string') return false
+    const hostUrl = parseAuthority(host)
+    if (hostUrl === undefined) return false
+    if (!isLoopbackHostname(hostUrl.hostname) && !isTrustedAuthority(hostUrl, trustedHostsOf())) return false
+    if (req.headers && req.headers['sec-fetch-site'] === 'cross-site') return false
+    const origin = req.headers && req.headers.origin
+    if (origin === undefined) return true
+    try { return new URL(origin).host === hostUrl.host } catch (e) { return false }
+  }
+  const readJsonBody = async (req) => {
+    const chunks = []
+    let total = 0
+    for await (const chunk of req) {
+      const buffer = typeof chunk === 'string' ? Buffer.from(chunk) : chunk
+      total += buffer.length
+      if (total > 1 << 20) throw new Error('request body too large')
+      chunks.push(buffer)
     }
-  })
+    const text = Buffer.concat(chunks).toString('utf8')
+    if (text.trim() === '') return {}
+    try { return JSON.parse(text) } catch (e) { throw new Error('request body is not valid JSON') }
+  }
+  const writeJson = (res, status, body) => {
+    res.writeHead(status, { 'content-type': 'application/json; charset=utf-8' })
+    res.end(JSON.stringify(body))
+  }
 
-  harness.handle('btw/state', async () => {
-    return { ok: true, messages: state.history.slice() }
-  })
-
-  harness.handle('btw/clear', async (args) => {
-    await clearBtw()
-    return { ok: true }
-  })
+  ctx.effect(() => ctx.webServer.register({
+    kind: 'prefix',
+    path: '/api/dsh-btw',
+    handler: async (req, res) => {
+      if (!isTrustedApiRequest(req)) {
+        writeJson(res, 403, { ok: false, error: 'forbidden' })
+        return
+      }
+      if (req.method !== 'POST') {
+        writeJson(res, 405, { ok: false, error: 'method not allowed' })
+        return
+      }
+      const pathname = new URL(req.url || '/', 'http://dsh.internal').pathname
+      const method = pathname.startsWith('/api/dsh-btw/') ? pathname.slice('/api/dsh-btw/'.length) : undefined
+      if (method === undefined || method.includes('/')) {
+        writeJson(res, 404, { ok: false, error: 'unknown dsh-btw API method' })
+        return
+      }
+      const handler = rpcHandlers[method]
+      if (!handler) {
+        writeJson(res, 404, { ok: false, error: 'unknown dsh-btw API method' })
+        return
+      }
+      try {
+        const payload = await readJsonBody(req)
+        writeJson(res, 200, await handler(payload))
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err)
+        writeJson(res, 500, { ok: false, error: message })
+      }
+    },
+  }), 'dsh-btw: /api/dsh-btw routes')
 }

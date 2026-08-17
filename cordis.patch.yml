@@ -1,0 +1,18 @@
+# dsh-btw bundle patch
+#
+# `dsh.bundle.patch` layer of the package: when installed through the official
+# CLI —
+#
+#   dsh plugin --profile web add <本仓库路径>
+#
+# — the command appends this single `insert` (one plugin row) to the profile's
+# bundle stack (`dsh.profile.bundles`), exactly like a manual cordis.patch.yml
+# mount line. No profile edits needed.
+#
+# The row mounts the Host half (package main → src/host.js) and, because the
+# package declares `dsh.client.platform: web` + `exports["./client"]`, the
+# client-modules scan loads the built browser bundle (dist/client.js) into the
+# web GUI.
+- insert:
+    - id: dsh-btw
+      name: 'dsh-btw'
