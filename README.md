@@ -1,5 +1,8 @@
 # dsh-btw
 
+> **更好的推荐**：[ChenRuoT/dsh-sidebar-qa](https://github.com/ChenRuoT/dsh-sidebar-qa)
+> 本项目不再维护，上述项目已经能完全实现本项目的功能且使用起来更方便
+
 > ⚠️ **仍在开发中（WIP）**
 >
 > 本项目处于**活跃开发阶段**，尚未发布稳定版本（v0.1.0 以下）。API、命令行为、RPC 契约与
